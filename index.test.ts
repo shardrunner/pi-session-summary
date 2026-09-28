@@ -3,15 +3,46 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import register from "./index.ts";
 
-function harness(t: test.TestContext, entries: unknown[] = [], mode = "tui") {
+function harness(
+	t: test.TestContext,
+	entries: unknown[] = [],
+	mode = "tui",
+	options: {
+		getEntriesThrows?: boolean;
+		flag?: boolean | string;
+		flags?: Record<string, boolean | string | undefined>;
+		leafId?: string | null;
+		noLeafMethod?: boolean;
+	} = {},
+) {
 	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
-	register({ on: (name: string, handler: any) => { handlers.set(name, handler); } } as ExtensionAPI);
+	register({
+		on: (name: string, handler: any) => {
+			handlers.set(name, handler);
+		},
+		registerFlag: () => {},
+		getFlag: (name: string) => {
+			if (options.flags && name in options.flags) return options.flags[name];
+			if (name === "no-session-summary") return options.flag;
+			return undefined;
+		},
+	} as unknown as ExtensionAPI);
 	let output = "";
-	t.mock.method(process.stdout, "write", (text: string) => { output += text; return true; });
-	const ctx = {
-		mode,
-		sessionManager: { getEntries: () => entries as SessionEntry[] },
-	} as ExtensionContext;
+	t.mock.method(process.stdout, "write", (text: string) => {
+		output += text;
+		return true;
+	});
+	const sessionManager: Record<string, unknown> = {
+			getEntries: () => {
+				if (options.getEntriesThrows) throw new Error("boom");
+				return entries as SessionEntry[];
+			},
+		};
+		if (!options.noLeafMethod) sessionManager.getLeafId = () => options.leafId ?? null;
+		const ctx = {
+			mode,
+			sessionManager,
+		} as unknown as ExtensionContext;
 	return {
 		emit: (name: string, event: unknown) => handlers.get(name)!(event, ctx),
 		output: () => output,
@@ -19,7 +50,11 @@ function harness(t: test.TestContext, entries: unknown[] = [], mode = "tui") {
 }
 
 const usage = {
-	input: 10, output: 20, cacheRead: 30, cacheWrite: 40, totalTokens: 100,
+	input: 10,
+	output: 20,
+	cacheRead: 30,
+	cacheWrite: 40,
+	totalTokens: 100,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1 },
 };
 
@@ -67,3 +102,188 @@ for (const mode of ["rpc", "json", "print"]) {
 		assert.equal(h.output(), "");
 	});
 }
+
+test("ignores assistant messages without usage instead of crashing", (t) => {
+	const h = harness(t, [
+		{ type: "message", message: { role: "assistant" } },
+		{ type: "message", message: { role: "assistant", usage } },
+		{ type: "message", message: { role: "toolResult" } },
+		{ type: "compaction" },
+		{ type: "branch_summary" },
+		{ type: "usage", kind: "cache_warm" },
+		{ type: "custom", data: { usage } },
+		{ type: "message", message: { role: "user" } },
+	]);
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Tokens: 100 total \(80 prompt, 20 output\)/);
+	assert.match(h.output(), /Cost: \$0\.1000/);
+	assert.match(h.output(), /Calls: 2 model, 1 tool/);
+});
+
+test("tolerates malformed usage without NaN", (t) => {
+	const h = harness(t, [
+		{
+			type: "message",
+			message: {
+				role: "assistant",
+				usage: { input: "10", output: Number.NaN, cacheRead: undefined, cacheWrite: null, totalTokens: 50 },
+			},
+		},
+		{ type: "message", message: { role: "toolResult", usage: "garbage" } },
+		{ type: "usage", kind: "x", usage: { input: 5, cost: { total: "bad" } } },
+	]);
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Tokens: 50 total/);
+	assert.match(h.output(), /Cost: \$0\.0000/);
+	assert.doesNotMatch(h.output(), /NaN/);
+});
+
+test("never throws when getEntries fails", (t) => {
+	const h = harness(t, [], "tui", { getEntriesThrows: true });
+	assert.doesNotThrow(() => h.emit("session_shutdown", { reason: "quit" }));
+	assert.equal(h.output(), "");
+});
+
+test("never throws when stdout fails", (t) => {
+	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
+	register({
+		on: (name: string, handler: any) => {
+			handlers.set(name, handler);
+		},
+		registerFlag: () => {},
+		getFlag: () => false,
+	} as unknown as ExtensionAPI);
+	t.mock.method(process.stdout, "write", () => {
+		throw new Error("EPIPE");
+	});
+	const ctx = { mode: "tui", sessionManager: { getEntries: () => [] } } as unknown as ExtensionContext;
+	assert.doesNotThrow(() => handlers.get("session_shutdown")!({ reason: "quit" }, ctx));
+});
+
+test("never throws when stdout fails asynchronously", (t) => {
+	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
+	register({
+		on: (name: string, handler: any) => {
+			handlers.set(name, handler);
+		},
+		registerFlag: () => {},
+		getFlag: () => false,
+	} as unknown as ExtensionAPI);
+	let captured: ((error?: Error) => void) | undefined;
+	t.mock.method(process.stdout, "write", (_text: string, callback?: (error?: Error) => void) => {
+		captured = callback;
+		return true;
+	});
+	const ctx = { mode: "tui", sessionManager: { getEntries: () => [] } } as unknown as ExtensionContext;
+	assert.doesNotThrow(() => handlers.get("session_shutdown")!({ reason: "quit" }, ctx));
+	// An async EPIPE delivered to the write callback must not throw either.
+	assert.ok(captured, "write callback not captured");
+	assert.doesNotThrow(() => captured!(new Error("EPIPE")));
+});
+
+test("respects --no-session-summary flag", (t) => {
+	const h = harness(t, [{ type: "message", message: { role: "assistant", usage } }], "tui", { flag: true });
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.equal(h.output(), "");
+});
+
+test("formats long durations with days and omits zero parts", (t) => {
+	let now = 0;
+	t.mock.method(Date, "now", () => now);
+	const h = harness(t);
+	now = 1_000;
+	h.emit("session_start", {});
+	// 2d 3h 5s, with zero minutes omitted.
+	now += (2 * 86_400 + 3 * 3_600 + 5) * 1_000;
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Run time: 2d 3h 5s/);
+});
+
+test("groups large token counts instead of compact notation", (t) => {
+	const big = { ...usage, input: 1_234_567, totalTokens: 1_234_587 };
+	const h = harness(t, [{ type: "message", message: { role: "assistant", usage: big } }]);
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /1,234,637 prompt/);
+	assert.doesNotMatch(h.output(), /1\.2M/);
+});
+
+test("branch scope excludes abandoned branch entries", (t) => {
+	const onBranch = { ...usage, totalTokens: 100 };
+	const offBranch = { ...usage, totalTokens: 900 };
+	const entries = [
+		{ type: "message", id: "a", parentId: null, message: { role: "assistant", usage: onBranch } },
+		{ type: "message", id: "b", parentId: "a", message: { role: "assistant", usage: offBranch } },
+		{ type: "message", id: "c", parentId: "a", message: { role: "assistant", usage: onBranch } },
+	];
+	const h = harness(t, entries, "tui", {
+		flags: { "session-summary-scope": "branch" },
+		leafId: "c",
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary \(current branch\)/);
+	assert.match(h.output(), /Tokens: 200 total/);
+	assert.doesNotMatch(h.output(), /1,000 total/);
+});
+
+test("branch scope falls back to all entries when the leaf is unknown", (t) => {
+	const entries = [
+		{ type: "message", id: "a", parentId: null, message: { role: "assistant", usage } },
+		{ type: "message", id: "b", parentId: "a", message: { role: "assistant", usage } },
+	];
+	const h = harness(t, entries, "tui", {
+		flags: { "session-summary-scope": "branch" },
+		leafId: "missing-leaf",
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary \(all branches \(current branch unavailable\)\)/);
+	assert.match(h.output(), /Tokens: 200 total/);
+});
+
+test("branch scope with a null leaf reports an empty current branch", (t) => {
+	const entries = [
+		{ type: "message", id: "a", parentId: null, message: { role: "assistant", usage } },
+	];
+	const h = harness(t, entries, "tui", {
+		flags: { "session-summary-scope": "branch" },
+		leafId: null,
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary \(current branch\)/);
+	assert.match(h.output(), /Tokens: 0 total/);
+	assert.match(h.output(), /Calls: 0 model, 0 tool results/);
+});
+
+test("branch scope without getLeafId falls back and says so", (t) => {
+	const entries = [
+		{ type: "message", id: "a", parentId: null, message: { role: "assistant", usage } },
+	];
+	const h = harness(t, entries, "tui", {
+		flags: { "session-summary-scope": "branch" },
+		noLeafMethod: true,
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary \(all branches \(current branch unavailable\)\)/);
+	assert.match(h.output(), /Tokens: 100 total/);
+});
+
+test("unknown scope values fall back to all branches", (t) => {
+	const h = harness(t, [{ type: "message", message: { role: "assistant", usage } }], "tui", {
+		flags: { "session-summary-scope": "everything" },
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary \(all branches\)/);
+});
+
+test("a string flag value never suppresses the summary", (t) => {
+	const h = harness(t, [{ type: "message", message: { role: "assistant", usage } }], "tui", {
+		flags: { "no-session-summary": "false" as unknown as boolean },
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary/);
+});
+
+test("uses singular tool result noun for a single result", (t) => {
+	const h = harness(t, [{ type: "message", message: { role: "toolResult" } }]);
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Calls: 0 model, 1 tool result\n/);
+});
