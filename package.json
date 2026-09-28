@@ -1,0 +1,25 @@
+{
+  "name": "pi-session-summary",
+  "version": "0.1.0",
+  "description": "Print session token, cache, cost, and call totals when quitting Pi's TUI.",
+  "license": "MIT",
+  "author": "Michael Brunner",
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "keywords": ["pi-package", "pi", "sessions"],
+  "files": ["index.ts", "README.md", "LICENSE"],
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": {
+    "test": "node --test *.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.86.1",
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3"
+  }
+}
