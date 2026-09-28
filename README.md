@@ -5,7 +5,7 @@ No model calls, commands, settings, background tasks, or transcript writes.
 
 ## Install
 
-Requires **Pi 0.86.1+** and **Node.js 24+**. Development dependencies pin 0.86.1;
+Requires **Pi 0.87.1+** and **Node.js 24+**. Development dependencies pin 0.87.1;
 newer Pi versions are intended targets, not a guarantee against upstream API changes.
 
 Clone this repository and register the checkout as a local Pi package:
