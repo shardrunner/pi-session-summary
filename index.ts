@@ -43,7 +43,7 @@ function costTotal(usage: UsageLike): number {
 }
 
 function addUsage(totals: Totals, usage: unknown): void {
-	if (typeof usage !== "object" || usage === null) return;
+	if (!isRecord(usage)) return;
 	const u = usage as UsageLike;
 	totals.input += toNumber(u.input);
 	totals.output += toNumber(u.output);
@@ -100,7 +100,6 @@ function collectTotals(entries: unknown, leafId?: unknown, branchOnly = false): 
 	// Entries without usable id/parentId links (legacy shapes) opt out of
 	// filtering and are counted, since dropping them would under-report.
 	let allowed: Set<string> | null = null;
-	let fallback = false;
 	if (branchOnly && typeof leafId === "string" && leafId.length > 0) {
 		const byId = new Map<string, Record<string, unknown>>();
 		for (const item of entries) {
@@ -108,24 +107,16 @@ function collectTotals(entries: unknown, leafId?: unknown, branchOnly = false): 
 		}
 		if (byId.has(leafId)) {
 			allowed = new Set<string>();
-			const seen = new Set<string>();
 			let current: string | null = leafId;
-			while (typeof current === "string" && !seen.has(current)) {
-				seen.add(current);
+			while (typeof current === "string" && !allowed.has(current)) {
 				allowed.add(current);
 				const node = byId.get(current);
 				const parent = node?.parentId;
 				current = typeof parent === "string" ? parent : null;
 			}
-		} else {
-			// Resolvable leaf expected but absent from the file: cannot scope.
-			fallback = true;
 		}
-	} else if (branchOnly) {
-		// Non-string leaf (missing method, throw, or garbage; null is handled
-		// above): cannot scope, fall back to all entries.
-		fallback = true;
 	}
+	// Without an ancestor set, an unknown or unusable leaf falls back to all entries.
 
 	for (const item of entries) {
 		if (!isRecord(item)) continue;
@@ -138,52 +129,45 @@ function collectTotals(entries: unknown, leafId?: unknown, branchOnly = false): 
 		}
 		const type = item.type;
 		if (type === "message") {
-			const message = isRecord(item.message) ? (item.message as Record<string, unknown>) : undefined;
+			const message = isRecord(item.message) ? item.message : undefined;
 			if (message?.role === "assistant") {
 				// One assistant message is one model response. Usage may be
 				// absent (aborted/errored/legacy entries): count the response,
 				// add usage only when present.
 				totals.modelCalls++;
-				if ("usage" in message) addUsage(totals, message.usage);
 			} else if (message?.role === "toolResult") {
 				// One toolResult message is one completed tool execution.
 				// A single assistant message may request several tools, so
 				// this is a message count, not a distinct-tool count.
 				totals.toolCalls++;
-				if ("usage" in message) addUsage(totals, message.usage);
+			} else {
+				continue;
 			}
+			addUsage(totals, message.usage);
 		} else if (type === "branch_summary" || type === "compaction" || type === "usage") {
-			if ("usage" in item) addUsage(totals, item.usage);
+			addUsage(totals, item.usage);
 		}
 		// All other entry types (user messages, custom state, labels,
 		// session_info, model/thinking changes) carry no billable usage.
 	}
 
-	return { totals, effectiveScope: fallback || !branchOnly ? "all" : "branch" };
+	return { totals, effectiveScope: allowed === null ? "all" : "branch" };
 }
 
 export default function (pi: ExtensionAPI) {
 	let startedAt = Date.now();
 
-	try {
-		pi.registerFlag(FLAG_OFF, {
-			description: "Suppress the session summary printed on TUI quit.",
-			type: "boolean",
-			default: false,
-		});
-	} catch {
-		// Older Pi runtimes without registerFlag: opt-out flag simply unavailable.
-	}
+	pi.registerFlag(FLAG_OFF, {
+		description: "Suppress the session summary printed on TUI quit.",
+		type: "boolean",
+		default: false,
+	});
 
-	try {
-		pi.registerFlag(FLAG_SCOPE, {
-			description: "Session summary scope: 'all' entries in the session file or 'branch' for the current branch only.",
-			type: "string",
-			default: "all",
-		});
-	} catch {
-		// Older Pi runtimes without registerFlag: scope flag simply unavailable.
-	}
+	pi.registerFlag(FLAG_SCOPE, {
+		description: "Session summary scope: 'all' entries in the session file or 'branch' for the current branch only.",
+		type: "string",
+		default: "all",
+	});
 
 	pi.on("session_start", () => {
 		startedAt = Date.now();
@@ -193,32 +177,19 @@ export default function (pi: ExtensionAPI) {
 		// Cosmetic feature: never break quit, reload, or session switching.
 		try {
 			if (event?.reason !== "quit" || ctx?.mode !== "tui") return;
-			try {
-				// Strict === true: a string "false" must never suppress output.
-				if (pi.getFlag(FLAG_OFF) === true) return;
-			} catch {
-				// getFlag unavailable: fall through and print.
-			}
-
-			let scope: Scope = "all";
-			try {
-				if (pi.getFlag(FLAG_SCOPE) === "branch") scope = "branch";
-			} catch {
-				// getFlag unavailable: fall through with default scope.
-			}
+			// Strict === true: a string "false" must never suppress output.
+			if (pi.getFlag(FLAG_OFF) === true) return;
+			const branchRequested = pi.getFlag(FLAG_SCOPE) === "branch";
 
 			let leafId: unknown;
-			try {
-				leafId = ctx.sessionManager.getLeafId?.();
-			} catch {
-				leafId = undefined;
+			if (branchRequested) {
+				try {
+					leafId = ctx.sessionManager.getLeafId?.();
+				} catch {
+					leafId = undefined;
+				}
 			}
-			const branchRequested = scope === "branch";
-			const { totals, effectiveScope } = collectTotals(
-				ctx.sessionManager.getEntries(),
-				branchRequested ? leafId : undefined,
-				branchRequested,
-			);
+			const { totals, effectiveScope } = collectTotals(ctx.sessionManager.getEntries(), leafId, branchRequested);
 
 			const promptTokens = totals.input + totals.cacheRead + totals.cacheWrite;
 			const cache =

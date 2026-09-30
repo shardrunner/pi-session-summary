@@ -28,7 +28,7 @@ function harness(
 		},
 	} as unknown as ExtensionAPI);
 	let output = "";
-	t.mock.method(process.stdout, "write", (text: string) => {
+	const writeMock = t.mock.method(process.stdout, "write", (text: string) => {
 		output += text;
 		return true;
 	});
@@ -46,6 +46,7 @@ function harness(
 	return {
 		emit: (name: string, event: unknown) => handlers.get(name)!(event, ctx),
 		output: () => output,
+		writeMock,
 	};
 }
 
@@ -61,8 +62,18 @@ const usage = {
 test("counts assistant, nested tool, summary, and standalone usage without inventing calls", (t) => {
 	const h = harness(t, [
 		{ type: "message", message: { role: "assistant", usage } },
-		{ type: "message", message: { role: "toolResult", usage } },
+		{
+			type: "message",
+			message: {
+				role: "toolResult",
+				usage,
+				// Parent usage already includes nested calls; diagnostics are not additional usage.
+				nestedCalls: { complete: true, calls: [{ id: "parent/1", name: "nested", status: "ok", usage }] },
+				details: { calls: [{ usage, cost: usage.cost }] },
+			},
+		},
 		{ type: "message", message: { role: "toolResult" } },
+		{ type: "message", message: { role: "user", usage } },
 		{ type: "compaction", usage },
 		{ type: "branch_summary", usage },
 		{ type: "usage", kind: "cache_warm", usage },
@@ -145,37 +156,23 @@ test("never throws when getEntries fails", (t) => {
 });
 
 test("never throws when stdout fails", (t) => {
-	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
-	register({
-		on: (name: string, handler: any) => {
-			handlers.set(name, handler);
-		},
-		registerFlag: () => {},
-		getFlag: () => false,
-	} as unknown as ExtensionAPI);
+	const h = harness(t);
+	h.writeMock.mock.restore();
 	t.mock.method(process.stdout, "write", () => {
 		throw new Error("EPIPE");
 	});
-	const ctx = { mode: "tui", sessionManager: { getEntries: () => [] } } as unknown as ExtensionContext;
-	assert.doesNotThrow(() => handlers.get("session_shutdown")!({ reason: "quit" }, ctx));
+	assert.doesNotThrow(() => h.emit("session_shutdown", { reason: "quit" }));
 });
 
 test("never throws when stdout fails asynchronously", (t) => {
-	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
-	register({
-		on: (name: string, handler: any) => {
-			handlers.set(name, handler);
-		},
-		registerFlag: () => {},
-		getFlag: () => false,
-	} as unknown as ExtensionAPI);
+	const h = harness(t);
 	let captured: ((error?: Error) => void) | undefined;
+	h.writeMock.mock.restore();
 	t.mock.method(process.stdout, "write", (_text: string, callback?: (error?: Error) => void) => {
 		captured = callback;
 		return true;
 	});
-	const ctx = { mode: "tui", sessionManager: { getEntries: () => [] } } as unknown as ExtensionContext;
-	assert.doesNotThrow(() => handlers.get("session_shutdown")!({ reason: "quit" }, ctx));
+	assert.doesNotThrow(() => h.emit("session_shutdown", { reason: "quit" }));
 	// An async EPIPE delivered to the write callback must not throw either.
 	assert.ok(captured, "write callback not captured");
 	assert.doesNotThrow(() => captured!(new Error("EPIPE")));
@@ -223,6 +220,23 @@ test("branch scope excludes abandoned branch entries", (t) => {
 	assert.match(h.output(), /Session summary \(current branch\)/);
 	assert.match(h.output(), /Tokens: 200 total/);
 	assert.doesNotMatch(h.output(), /1,000 total/);
+});
+
+test("branch scope stops at cycles and includes ID-less usage", (t) => {
+	const h = harness(t, [
+		{ type: "message", id: "a", parentId: "b", message: { role: "assistant", usage } },
+		{ type: "message", id: "b", parentId: "a", message: { role: "assistant", usage } },
+		{ type: "message", id: "off", parentId: null, message: { role: "assistant", usage } },
+		{ type: "usage", usage },
+	], "tui", {
+		flags: { "session-summary-scope": "branch" },
+		leafId: "b",
+	});
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary \(current branch\)/);
+	assert.match(h.output(), /Tokens: 300 total \(240 prompt, 60 output\)/);
+	assert.match(h.output(), /Cost: \$0\.3000/);
+	assert.match(h.output(), /Calls: 2 model, 0 tool results/);
 });
 
 test("branch scope falls back to all entries when the leaf is unknown", (t) => {
