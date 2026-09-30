@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Writable } from "node:stream";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import register from "./index.ts";
 
@@ -28,8 +29,9 @@ function harness(
 		},
 	} as unknown as ExtensionAPI);
 	let output = "";
-	const writeMock = t.mock.method(process.stdout, "write", (text: string) => {
+	const writeMock = t.mock.method(process.stdout, "write", (text: string, callback?: (error?: Error) => void) => {
 		output += text;
+		callback?.();
 		return true;
 	});
 	const sessionManager: Record<string, unknown> = {
@@ -155,27 +157,46 @@ test("never throws when getEntries fails", (t) => {
 	assert.equal(h.output(), "");
 });
 
-test("never throws when stdout fails", (t) => {
+test("never throws when stdout fails and removes temporary error handling", (t) => {
 	const h = harness(t);
 	h.writeMock.mock.restore();
+	const listeners = process.stdout.listenerCount("error");
 	t.mock.method(process.stdout, "write", () => {
 		throw new Error("EPIPE");
 	});
 	assert.doesNotThrow(() => h.emit("session_shutdown", { reason: "quit" }));
+	assert.equal(process.stdout.listenerCount("error"), listeners);
 });
 
-test("never throws when stdout fails asynchronously", (t) => {
+test("protects asynchronous write errors through event emission without retaining handlers", async (t) => {
 	const h = harness(t);
-	let captured: ((error?: Error) => void) | undefined;
 	h.writeMock.mock.restore();
-	t.mock.method(process.stdout, "write", (_text: string, callback?: (error?: Error) => void) => {
-		captured = callback;
-		return true;
+	let listenersDuringWrite = 0;
+	let emittedError: Error | undefined;
+	const stream = new Writable({
+		write(_chunk, _encoding, callback) {
+			listenersDuringWrite = stream.listenerCount("error");
+			setImmediate(() => callback(new Error("EPIPE")));
+		},
 	});
-	assert.doesNotThrow(() => h.emit("session_shutdown", { reason: "quit" }));
-	// An async EPIPE delivered to the write callback must not throw either.
-	assert.ok(captured, "write callback not captured");
-	assert.doesNotThrow(() => captured!(new Error("EPIPE")));
+	const hostHandler = (error: Error) => { emittedError = error; };
+	stream.on("error", hostHandler);
+	t.mock.getter(process, "stdout", () => stream as typeof process.stdout);
+	const closed = new Promise<void>((resolve) => stream.once("close", resolve));
+	h.emit("session_shutdown", { reason: "quit" });
+	await closed;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(listenersDuringWrite, 2, "summary needs its own handler before writing");
+	assert.equal(emittedError?.message, "EPIPE", "existing host handlers must remain functional");
+	assert.deepEqual(stream.listeners("error"), [hostHandler]);
+});
+
+test("successful writes leave no temporary error handler", (t) => {
+	const h = harness(t);
+	const listeners = process.stdout.listenerCount("error");
+	h.emit("session_shutdown", { reason: "quit" });
+	assert.match(h.output(), /Session summary/);
+	assert.equal(process.stdout.listenerCount("error"), listeners);
 });
 
 test("respects --no-session-summary flag", (t) => {

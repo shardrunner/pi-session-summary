@@ -217,15 +217,20 @@ export default function (pi: ExtensionAPI) {
 				`  Cost: $${totals.cost.toFixed(4)}\n` +
 				`  Calls: ${totals.modelCalls} model, ${totals.toolCalls} ${toolNoun}\n` +
 				`  Run time: ${formatDuration(Date.now() - startedAt)}\n\n`;
-			// Sync throws are caught below. Async stream failures (EPIPE with
-			// the terminal gone) go to the write callback instead of
-			// surfacing as 'error' events, which would throw without a
-			// listener and disrupt shutdown.
 			const out = process.stdout;
+			if (out.destroyed) return;
+			// Node can emit 'error' after invoking the failed write's callback.
+			// Protect this write without replacing existing host error handlers.
+			const ignoreError = () => undefined;
+			const cleanup = () => out.removeListener("error", ignoreError);
+			out.once("error", ignoreError);
 			try {
-				if (out.destroyed !== true) out.write(summary, () => undefined);
+				out.write(summary, (error) => {
+					if (error) setImmediate(cleanup).unref();
+					else cleanup();
+				});
 			} catch {
-				// Intentionally silent (see above).
+				cleanup();
 			}
 		} catch {
 			// Intentionally silent: a summary must never interrupt shutdown.
