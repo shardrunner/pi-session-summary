@@ -1,5 +1,7 @@
 # pi-session-summary
 
+> **Disclaimer:** This extension is vibe coded. Use at your own risk.
+
 Print token, cache, cost, call, and elapsed-time totals when quitting Pi's TUI.
 No model calls, commands, settings, background tasks, or transcript writes.
 
