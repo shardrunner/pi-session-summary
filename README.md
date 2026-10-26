@@ -7,7 +7,8 @@ estimated cost, model calls, tool results and run time, printed to the terminal.
 
 ## Why
 
-- Once a session ends, it's easy to lose track of what it actually used in tokens, cache and cost. The summary shows it at a glance on every quit.
+- Once a session ends, it's easy to lose track of what it actually used in tokens, cache and cost.
+- Seeing the numbers on every quit builds a feel for typical sessions and how they change over time.
 
 ## Features
 
