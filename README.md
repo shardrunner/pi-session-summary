@@ -2,81 +2,63 @@
 
 > **Disclaimer:** This extension is vibe coded for personal use. Use at your own risk.
 
-See what your [Pi](https://pi.dev) session consumed when you quit: tokens, cache
-usage, estimated cost, model calls, tool results, and elapsed time, printed in
-the terminal.
+See what a [Pi](https://pi.dev) session used when you quit: tokens, cache usage,
+estimated cost, model calls, tool results and run time, printed to the terminal.
 
-No model calls, commands, settings, background tasks, or transcript writes.
+## Why
 
-## Install
+- Once a session ends, it's easy to lose track of what it actually used in tokens, cache and cost. The summary shows it at a glance on every quit.
 
-Requires **Pi 0.87.1+** and **Node.js 24+**. Development dependencies pin 0.87.1;
-newer Pi versions are intended targets, not a guarantee against upstream API changes.
+## Features
 
-Install from GitHub; Pi clones it and `pi update --extensions` keeps it current:
+- A summary printed when you quit the TUI.
+- Covers the whole session file, or only the current branch if you ask for it.
+- Totals match Pi's own `/usage` numbers.
+- No model calls, commands, settings, background tasks or changes to the transcript.
+- Never blocks or interrupts shutdown.
+
+## Installation
+
+Requires **Pi 0.87.1+** and **Node.js 24+**.
 
 ```sh
 pi install git:github.com/shardrunner/pi-session-summary
 ```
 
-For development, register a local checkout instead:
+Run `/reload` in open Pi sessions. Update with `pi update --extensions`.
+For local development, install a checkout instead
+(`pi install /absolute/path/to/pi-session-summary`) or try it once with
+`pi -e ./index.ts`. No runtime dependencies, no build step.
+
+## Usage
+
+Quit Pi normally to see the summary. Options:
 
 ```sh
-pi install /absolute/path/to/pi-session-summary
-```
-
-Pi loads a local package in place (no copy) and this package has no runtime
-dependencies, so no `npm install` is needed to use it. Run `/reload` in existing
-Pi instances. Or try it once with `pi -e ./index.ts` from this directory.
-
-To opt out for one run without uninstalling:
-
-```sh
-pi --no-session-summary
-```
-
-To scope the totals to the current branch instead of the whole session file:
-
-```sh
-pi --session-summary-scope branch
+pi --no-session-summary                 # skip the summary for this run
+pi --session-summary-scope branch       # count only the current branch
 ```
 
 Unknown scope values fall back to `all`.
 
-## Meaning of the totals
+## Behavior and limitations
 
-- Tokens and costs cover **all entries in the current session file** by default,
-  including other branches and history from before this Pi invocation
-  (the header reads "all branches"). Pass `--session-summary-scope branch`
-  to count only the current branch's ancestor chain; a null leaf (empty branch
-  after `resetLeaf`) reports zeros. Entries that cannot be placed on the chain
-  (missing ids) are still counted rather than silently dropped, and an
-  unresolvable leaf falls back to all entries with the header
-  "all branches (current branch unavailable)". They include assistant responses, nested tool usage,
-  compaction, branch summaries, and standalone usage entries such as cache
-  warming. Abandoned branches inflate the totals beyond the current leaf path;
-  this matches Pi's own `/usage` accounting, which also sums all entries.
-- Cache hit percentage is `cacheRead / (input + cacheRead + cacheWrite)`.
-  It describes recorded prompt usage, not cache residency or the next request.
-  Cache *writes* count toward the "miss (incl. writes)" side of the split.
-- Model calls count assistant messages (one message is one response); tool
-  calls count completed tool results ("1 tool result" / "2 tool results").
-  One assistant message may request several tools, and summary/warming operations contribute usage but no call counts.
-  Assistant messages without usage (aborted, errored, or legacy entries) are
-  counted but contribute zero tokens rather than crashing or printing NaN.
-- Run time starts at the latest `session_start`; it is not cumulative session
-  age. When the extension loads mid-session, the load time is the fallback
-  start until the next `session_start`.
-- Costs are Pi's recorded estimates, not an invoice. Unreported usage is not inferred.
-
-Output goes directly to the terminal on **TUI quit only**. Reload, new/resume/fork,
-RPC, print, and JSON modes remain silent. Nothing is added to model context.
-
-Caveat: on ordinary quit Pi stops the TUI (terminal restore) before running
-`session_shutdown` handlers, so the summary lands on a restored terminal.
-On signal-driven shutdown (SIGTERM/SIGHUP) the order is reversed and the
-terminal may be gone; the write is then best-effort and failure-silent by
-design. A summary must never interrupt shutdown.
+- **Scope:** by default, every entry in the session file is counted, including other
+  branches and earlier runs (shown as "all branches"). Abandoned branches therefore add
+  to the totals. With `branch`, only the path to the current entry is counted. If that
+  path can't be worked out, the summary falls back to all entries and says so in the
+  header.
+- **Cache hit rate** is `cacheRead / (input + cacheRead + cacheWrite)`. Cache writes
+  count as misses. It describes past usage, not what is cached now.
+- **Calls:** model calls are assistant messages; tool calls are completed tool results.
+  Summaries and cache warming add tokens but no calls. Messages without usage data count
+  as zero instead of breaking the totals.
+- **Run time** starts at the latest session start, not when the session was created.
+- **Costs** are Pi's recorded estimates, not an invoice.
+- **When it prints:** only when you quit the TUI. Reload, new/resume/fork, RPC, print
+  and JSON modes print nothing, and nothing is added to the model context. On a normal
+  quit the terminal is restored before the summary prints. On a signal (SIGTERM/SIGHUP)
+  the terminal may already be gone, so printing is best-effort and fails silently.
 
 ## Development
 
@@ -86,10 +68,10 @@ npm run check
 npm pack --dry-run
 ```
 
-The small offline suite checks accounting, quit-only output, runtime reset,
-malformed-usage tolerance, shutdown-failure silence, and the opt-out flag.
-Only the entry point, README, license, and manifest ship. `node_modules/` and
-`package-lock.json` are local development artifacts. No build step is needed;
-Pi supplies its SDK at runtime.
+Requires Node.js 24+. The offline test suite covers the totals, printing only on quit,
+run-time resets, broken usage data, silent failure at shutdown and the opt-out flag.
+Only the entry point, README, license and manifest are published.
 
-[MIT](LICENSE) © 2026 Michael Brunner.
+## License
+
+[MIT](LICENSE) © 2026 Michael Brunner
