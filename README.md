@@ -1,5 +1,7 @@
 # pi-session-summary
 
+> **Disclaimer:** This extension is vibe coded for personal use. Use at your own risk.
+
 See what your [Pi](https://pi.dev) session consumed when you quit: tokens, cache
 usage, estimated cost, model calls, tool results, and elapsed time, printed in
 the terminal.
@@ -75,11 +77,6 @@ Caveat: on ordinary quit Pi stops the TUI (terminal restore) before running
 On signal-driven shutdown (SIGTERM/SIGHUP) the order is reversed and the
 terminal may be gone; the write is then best-effort and failure-silent by
 design. A summary must never interrupt shutdown.
-
-## Project status
-
-Developed with AI assistance for personal use. Provided as-is, without support or
-compatibility guarantees. Review the source and documented limitations before use.
 
 ## Development
 
